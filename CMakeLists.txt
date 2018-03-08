@@ -9,3 +9,6 @@ target_link_libraries(transpose)
 
 add_executable(reduction reduction.cu)
 target_link_libraries(reduction)
+
+add_executable(mm mm.cu)
+target_link_libraries(mm)
