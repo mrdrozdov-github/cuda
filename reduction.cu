@@ -213,6 +213,76 @@ void cg_reduce6(int *idata, int *odata, int n, int height)
     cg_reduce6_helper<blockSize>(this_thread_block(), idata, odata, n, height);
 }
 
+// 7. Warp Shuffle
+
+__inline__ __device__
+int warpReduceSum(int val) {
+  for (int offset = warpSize/2; offset > 0; offset /= 2) 
+    val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+  return val;
+}
+
+__inline__ __device__
+int blockReduceSum(int val) {
+
+  static __shared__ int shared[32]; // Shared mem for 32 partial sums
+  int lane = threadIdx.x % warpSize;
+  int wid = threadIdx.x / warpSize;
+
+  val = warpReduceSum(val);     // Each warp performs partial reduction
+
+  if (lane==0) shared[wid]=val; // Write reduced value to shared memory
+
+  __syncthreads();              // Wait for all partial reductions
+
+  //read from shared memory only if that warp existed
+  val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : 0;
+
+  if (wid==0) val = warpReduceSum(val); //Final reduce within first warp
+
+  return val;
+}
+
+__device__
+void deviceReduceKernel(int *in, int* out, int N) {
+  int sum = 0;
+  //reduce multiple elements per thread
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; 
+       i < N; 
+       i += blockDim.x * gridDim.x) {
+    sum += in[i];
+  }
+  sum = blockReduceSum(sum);
+  if (threadIdx.x==0)
+    out[blockIdx.x]=sum;
+}
+
+__global__
+void cg_reduce7(int *idata, int *odata, int n, int height)
+{
+	deviceReduceKernel(idata, odata, n);
+}
+
+// 8. Warp Shuffle w. AtomicAdd
+
+__device__
+void deviceReduceWarpAtomicKernel(int *in, int* out, int N) {
+  int sum = int(0);
+  for(int i = blockIdx.x * blockDim.x + threadIdx.x; 
+      i < N; 
+      i += blockDim.x * gridDim.x) {
+    sum += in[i];
+  }
+  sum = warpReduceSum(sum);
+  if ((threadIdx.x & (warpSize - 1)) == 0)
+    atomicAdd(out, sum);
+}
+
+__global__
+void cg_reduce8(int *idata, int *odata, int n, int height)
+{
+	deviceReduceWarpAtomicKernel(idata, odata, n);
+}
 
 // TODO put your kernel here
 __global__
@@ -307,8 +377,8 @@ int main(int argc, char *argv[])
 {
     optparse::OptionParser parser = optparse::OptionParser();
 
-    char const *const choices[] = {"cg1", "cg2", "cg3", "cg4", "cg5", "cg6"};
-    parser.add_option("-m", "--method").choices(&choices[0], &choices[6]).set_default("cg1");
+    char const *const choices[] = {"cg1", "cg2", "cg3", "cg4", "cg5", "cg6", "cg7", "cg8"};
+    parser.add_option("-m", "--method").choices(&choices[0], &choices[8]).set_default("cg1");
 
     const optparse::Values &options = parser.parse_args(argc, argv);
     const std::vector<std::string> args = parser.args();
@@ -365,6 +435,12 @@ int main(int argc, char *argv[])
     } else if (strcmp(method.c_str(), choices[5]) == 0) {
         numBlocks /= 2;
         cg_reduce6<BLOCK_SIZE><<<numBlocks, numThreads>>>(d_idata, d_odata, n, height);
+    } else if (strcmp(method.c_str(), choices[6]) == 0) {
+        numBlocks /= 2;
+        cg_reduce7<<<numBlocks, numThreads>>>(d_idata, d_odata, n, height);
+    } else if (strcmp(method.c_str(), choices[7]) == 0) {
+        numBlocks /= 2;
+        cg_reduce8<<<numBlocks, numThreads>>>(d_idata, d_odata, n, height);
     } else {
         printf("invalid method: %s\n", method.c_str());
     }
