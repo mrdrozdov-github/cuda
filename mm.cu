@@ -11,16 +11,19 @@
  */
 
 #include <iostream>
+#include <stdio.h>
 
 // parameter describing the size of the matrices
-const int rows = 1024;
-const int cols = 1024;
+const int rows = 16;
+const int cols = 16;
 
 // block size for tiled multiplication using shared memory 
 const int BLOCK_SIZE = 16;
 
 // total number of blocks along X and Y
-const int NUM_BLOCKS = rows/BLOCK_SIZE;
+// const int NUM_BLOCKS = rows/BLOCK_SIZE;
+const int NUM_BLOCKS = ceil(float(rows*cols)/float(BLOCK_SIZE));
+
 
 // print the matrix
 void displayMatrix(float *a)
@@ -34,12 +37,46 @@ void displayMatrix(float *a)
     }
 }
 
+void matrixMultiplyCPU(float *a, float *b, float *c)
+{
+    for (int tid = 0; tid < rows * cols; tid++) {
+        int sum = 0;
+
+        for (int i = 0; i < cols; i++) {
+            int aRow = tid / cols;
+            int aCol = i;
+            int bRow = i;
+            int bCol = tid % cols;
+            int aIdx = aRow * cols + aCol;
+            int bIdx = bRow * cols + bCol;
+            sum += a[aIdx] * b[bIdx];
+        }
+
+        c[tid] = sum;
+    }
+}
+
 // using global memory
 __global__ void matrixMultiplyNaive(float *_a,   // pointer to matrix A on the device
                                     float *_b,   // pointer to matrix B on the device
                                     float *_c)   // pointer to matrix C = AB on the device
 {
-// TODO: Add the calculation of the inner product using global memory
+    // Add the calculation of the inner product using global memory
+    int tid = threadIdx.x + blockDim.x * blockIdx.x;
+
+    int sum = 0;
+
+    for (int i = 0; i < cols; i++) {
+        int aRow = tid / cols;
+        int aCol = i;
+        int bRow = i;
+        int bCol = tid % cols;
+        int aIdx = aRow * cols + aCol;
+        int bIdx = bRow * cols + bCol;
+        sum += _a[aIdx] * _b[bIdx];
+    }
+
+    _c[tid] = sum;
 }
 
 __global__ void matrixMultiplyTiled(float *_a,   // pointer to matrix A on the device
@@ -59,6 +96,7 @@ int main(int argc, char *argv[])
     float *a = new float[rows*cols];
     float *b = new float[rows*cols];
     float *c = new float[rows*cols];
+    float *d = new float[rows*cols];
 
     // define device pointers for the same arrays when they'll be copied to the device
     float *_a, *_b, *_c;
@@ -110,10 +148,12 @@ int main(int argc, char *argv[])
     cudaMemcpy(_a, a, rows*cols*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(_b, b, rows*cols*sizeof(float), cudaMemcpyHostToDevice);
 
-    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE, 1);
+    // dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE, 1);
+    dim3 dimBlock(BLOCK_SIZE); 
     
     // calculate number of blocks along X and Y in a 2D CUDA "grid"
-    dim3 dimGrid( ceil(float(cols)/float(dimBlock.x)), ceil(float(rows)/float(dimBlock.y)), 1 );
+    // dim3 dimGrid( ceil(float(cols)/float(dimBlock.x)), ceil(float(rows)/float(dimBlock.y)), 1 );
+    dim3 dimGrid(NUM_BLOCKS);
 
     float time;
 
@@ -126,9 +166,9 @@ int main(int argc, char *argv[])
     cudaEventRecord( start, 0);
 
     // launch the GPU kernel for parallel matrix multiplication of A and B
-//  matrixMultiplyNaive<<<dimGrid,dimBlock>>>(_a, _b, _c);
+    matrixMultiplyNaive<<<dimGrid,dimBlock>>>(_a, _b, _c);
 
-    matrixMultiplyTiled<<<dimGrid,dimBlock>>>(_a, _b, _c);
+    // matrixMultiplyTiled<<<dimGrid,dimBlock>>>(_a, _b, _c);
 
     // stop the timer
     cudaEventRecord( stop, 0);
@@ -138,11 +178,17 @@ int main(int argc, char *argv[])
     // print out the number of GFLOPs
     double GFLOPs = (double)(rows*cols) * 2*rows * 1000 / (1000*1000*1000*time);
     std::cout << "Elapsed Time  = " << time << " GFLOPs = " << GFLOPs << std::endl;
+    
+    // CPU Mat Mul
+    matrixMultiplyCPU(a, b, d);
 
     // copy the answer back to the host (CPU) from the device (GPU)
     cudaMemcpy(c, _c, rows*cols*sizeof(float), cudaMemcpyDeviceToHost);
 
+    printf("\nGPU:\n");
     if((rows<33) && (cols<33)) displayMatrix(c);
+    printf("\nCPU:\n");
+    if((rows<33) && (cols<33)) displayMatrix(d);
 
     // free device memory
     cudaFree(_a);
